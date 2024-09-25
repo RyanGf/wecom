@@ -1,157 +1,173 @@
 # -*- coding: utf-8 -*-
 
 from odoo import fields, models, api, _
-from odoo.tools import config, ormcache, mute_logger
+from odoo.exceptions import ValidationError
 
+# 定义字段类型选项
 FIELD_TYPES = [(key, key) for key in sorted(fields.Field.by_type)]
-
 
 class WeComAppConfig(models.Model):
     _name = "wecom.app_config"
     _description = "Wecom Application Configuration"
     _table = "wecom_app_config"
-    # _rec_name = "key"
     _order = "id"
 
-    app_id = fields.Many2one(   # type: ignore
+    # 关联到企业微信应用
+    app_id = fields.Many2one(
         "wecom.apps",
         string="Application",
         copy=False,
         ondelete="cascade",
-        default=lambda self: self.env["wecom.apps"].id,
-        # domain="[('company_id', '=', company_id)]",
         required=True,
     )
+    # 关联到公司
     company_id = fields.Many2one(related="app_id.company_id", store=True)
+    # 配置项名称
     name = fields.Char(string="Name", translate=True, required=True, copy=True)
-    key = fields.Char(
-        required=True,
-    )
-    ttype = fields.Selection(
-        selection=FIELD_TYPES, string="Field Type", required=True, copy=True
-    )
+    # 配置项键
+    key = fields.Char(required=True)
+    # 配置项类型
+    ttype = fields.Selection(selection=FIELD_TYPES, string="Field Type", required=True, copy=True)
+    # 配置项值
     value = fields.Text(required=True)
+    # 配置项描述
     description = fields.Html(string="Description", translate=True, copy=True)
 
+    # SQL约束，确保每个应用的配置键是唯一的
     _sql_constraints = [
         (
             "app_id_key_uniq",
             "unique (app_id,key)",
-            _("The key of each application must be unique !"),
+            _("The key of each application must be unique!"),
         )
     ]
 
-    def get_format_field_value_and_type(self, res_id=False, field_name=""):
+    @api.constrains('ttype', 'value')
+    def _check_value_type(self):
         """
-        JS 获取需要格式化的字段的类型和值
-        :return:
+        验证值是否符合指定的字段类型
         """
-        res = self.browse(res_id)
-        return res.ttype        # type: ignore
-        # return {
-        #     "id": res_id,
-        #     "value_type": res.ttype,
-        #     "value": res.value,
-        # }
+        for record in self:
+            try:
+                self._convert_value(record.value, record.ttype)
+            except ValueError:
+                raise ValidationError(_("The value does not match the specified field type."))
 
-    def update_config(self, res_id=False, value=""):
+    @api.model
+    def _convert_value(self, value, ttype):
         """
-        更新参数
+        根据指定的类型转换值
         """
-        # res = self.browse(res_id)
-        app_config = (
-            self.env["wecom.app_config"]
-            .sudo()
-            .search([("id", "=", res_id),])
-        )
-
-        app_config.sudo().write({"value": value})
-        print(app_config.value)
-        return app_config.value
+        if ttype == 'boolean':
+            if isinstance(value, str):
+                value = value.lower()
+                if value in ('true', 'yes', 't', '1'):
+                    return True
+                elif value in ('false', 'no', 'f', '0'):
+                    return False
+            return bool(value)
+        elif ttype in ('integer', 'float'):
+            return fields.Float.from_string(value)
+        elif ttype == 'datetime':
+            return fields.Datetime.from_string(value)
+        elif ttype == 'date':
+            return fields.Date.from_string(value)
+        return value
 
     @api.model
     def get_param(self, app_id, key, default=False):
-        """检索给定key的value
-
-        :param string key: 要检索的参数值的键。
-        :param string default: 如果缺少参数，则为默认值。
-        :return: 参数的值， 如果不存在，则为 ``default``.
-        :rtype: string
         """
-        return self._get_param(app_id, key) or default
-
-    def _get_param(self, app_id, key):
-        params = self.search_read(
-            [("app_id", "=", app_id), ("key", "=", key)],
-            fields=["ttype", "value"],
-            limit=1,
-        )
-        value = None
-        ttype = None
-        if not params:
-            # 如果没有找到，搜索其他公司相同应用配置参数 进行复制
-            copy_app_config = self.search([("key", "=", key)], limit=1)
-            if copy_app_config:
-                new_app_config = self.create(
-                    {
-                        "app_id": app_id,
-                        "name": copy_app_config.name,   # type: ignore
-                        "key": copy_app_config.key, # type: ignore
-                        "ttype": copy_app_config.ttype, # type: ignore
-                        "value": copy_app_config.value, # type: ignore
-                        "description": copy_app_config.description, # type: ignore
-                    }
-                )
-                value = new_app_config.value
-                ttype = new_app_config.ttype
-            else:
-                pass
-        else:
-            value = params[0]["value"]
-            ttype = params[0]["ttype"]
-
-        if ttype == "boolean":
-            boolean_value = str(value).lower()
-            if boolean_value in ["true", "yes", "t", "1"]:
-                return True
-            elif boolean_value in ["false", "no", "f", "0"]:
-                return False
-            else:
-                return False
-        return value if params else None
+        获取指定键的参数值
+        :param app_id: 应用ID
+        :param key: 参数键
+        :param default: 默认值
+        :return: 参数值或默认值
+        """
+        param = self.search([('app_id', '=', app_id), ('key', '=', key)], limit=1)
+        if not param:
+            return default
+        return self._convert_value(param.value, param.ttype)
 
     @api.model
-    def set_param(self, app_id, key, value):
-        """设置参数的值。
-
-        :param string key: 要设置的参数值的键。
-        :param string value: 要设置的值。
-        :return: 参数的上一个值，如果不存在，则为False。
-        :rtype: string
+    def set_param(self, app_id, key, value, ttype=None):
         """
-        param = self.search([("app_id", "=", app_id), ("key", "=", key)])
+        设置参数值
+        :param app_id: 应用ID
+        :param key: 参数键
+        :param value: 参数值
+        :param ttype: 参数类型
+        :return: 操作是否成功
+        """
+        param = self.search([('app_id', '=', app_id), ('key', '=', key)])
         if param:
-            old = param.value   # type: ignore
             if value is not False and value is not None:
-                if str(value) != old:
-                    param.write({"value": value})   # type: ignore
+                return param.write({'value': value})
             else:
-                param.unlink()  # type: ignore
-            return old
-        else:
-            if value is not False and value is not None:
-                self.create({"app_id": app_id, "key": key, "value": value})
-            return False
+                return param.unlink()
+        elif value is not False and value is not None:
+            if not ttype:
+                ttype = 'char'
+            return self.create({
+                'app_id': app_id,
+                'key': key,
+                'value': value,
+                'ttype': ttype
+            })
+        return False
 
-    @api.model_create_multi
-    def create(self, vals_list):
+    def update_config(self, value):
+        """
+        更新配置值
+        :param value: 新的配置值
+        :return: 更新操作的结果
+        """
+        self.ensure_one()
+        return self.write({'value': value})
+
+    @api.model
+    def create(self, vals):
+        """
+        创建新记录时清除缓存
+        """
+        record = super(WeComAppConfig, self).create(vals)
         self.clear_caches()
-        return super(WeComAppConfig, self).create(vals_list)
+        return record
 
     def write(self, vals):
+        """
+        更新记录时清除缓存
+        """
+        result = super(WeComAppConfig, self).write(vals)
         self.clear_caches()
-        return super(WeComAppConfig, self).write(vals)
+        return result
 
     def unlink(self):
+        """
+        删除记录时清除缓存
+        """
+        result = super(WeComAppConfig, self).unlink()
         self.clear_caches()
-        return super(WeComAppConfig, self).unlink()
+        return result
+
+    @api.model
+    def bulk_set_params(self, app_id, params_dict):
+        """
+        批量设置多个参数
+        :param app_id: 应用ID
+        :param params_dict: 参数字典 {key: value}
+        :return: 操作是否成功
+        """
+        for key, value in params_dict.items():
+            self.set_param(app_id, key, value)
+        return True
+
+    @api.model
+    def bulk_get_params(self, app_id, keys):
+        """
+        批量获取多个参数
+        :param app_id: 应用ID
+        :param keys: 参数键列表
+        :return: 参数字典 {key: value}
+        """
+        params = self.search([('app_id', '=', app_id), ('key', 'in', keys)])
+        return {param.key: self._convert_value(param.value, param.ttype) for param in params}
